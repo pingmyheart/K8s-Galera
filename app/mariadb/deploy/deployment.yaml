@@ -42,7 +42,7 @@ spec:
           command:
             - sh
             - -c
-            - sh /opt/run.sh
+            - bash /opt/run.sh
           volumeMounts:
             - mountPath: /opt/run.sh
               name: mariadb

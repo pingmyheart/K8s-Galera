@@ -23,7 +23,7 @@ data:
 
     wsrep_sst_method=rsync
   run.sh: |-
-    #!/bin/sh
+    #!/bin/bash
 
     echo "Determining current pod and statefulset..."
     POD_NAME=$(hostname)
@@ -41,43 +41,98 @@ data:
     GRASTATE_FILE="$DATA_DIR/grastate.dat"
 
     mkdir -p "$DATA_DIR"
-
-    CLUSTER_FOUND=0
-    BOOTSTRAP_REQUIRED=1
-
-    echo "Checking existing cluster state..."
-
-    # 1. If any node is already alive in a cluster → join, do NOT bootstrap
+    
+    ONLY_NODE=1
     for node in $CLUSTER_NODES; do
       if [ "$node" = "${POD_NAME}.mariadb" ]; then
         continue
       fi
-
+    
       if mysqladmin ping -h "$node" --silent; then
         echo "Detected active MySQL node: $node"
-        CLUSTER_FOUND=1
+        ONLY_NODE=0
         BOOTSTRAP_REQUIRED=0
         break
       fi
     done
-
-    # 2. If local grastate.dat exists and safe_to_bootstrap is 0 → cluster already existed
-    if [ -f "$GRASTATE_FILE" ]; then
-      echo "Found existing grastate.dat"
-
-      SAFE_TO_BOOTSTRAP=$(grep -i "safe_to_bootstrap" "$GRASTATE_FILE" | awk -F': ' '{print $2}')
-
-      if [ "$SAFE_TO_BOOTSTRAP" != "1" ]; then
-        echo "Node has prior cluster history → joining existing cluster"
-        BOOTSTRAP_REQUIRED=0
+    
+    if [ ! -f "$GRASTATE_FILE" ]; then
+      if [ "$ONLY_NODE" -eq 1 ]; then
+        echo "No active MySQL nodes detected → bootstrapping new Galera cluster"
+        exec docker-entrypoint.sh mysqld --wsrep-new-cluster
+      else
+        echo "No grastate.dat found but other nodes are active → joining existing cluster"
+        exec docker-entrypoint.sh mysqld
       fi
-    fi
-
-    # 3. Start server accordingly
-    if [ "$BOOTSTRAP_REQUIRED" -eq 1 ]; then
-      echo "No existing cluster detected → bootstrapping new Galera cluster"
-      exec docker-entrypoint.sh mysqld --wsrep-new-cluster
     else
-      echo "Joining existing Galera cluster"
-      exec docker-entrypoint.sh mysqld
+      if [ "$ONLY_NODE" -eq 1 ]; then
+        # Check if grastate.dat indicates safe_to_bootstrap=1 → if so, bootstrap from existing data instead of starting as a new cluster
+        echo "grastate.dat found but no active MySQL nodes detected → checking if safe_to_bootstrap=1 to bootstrap from existing data"
+        find /var/lib/mysql -regex '.*grastate.dat' -print0 | while IFS= read -r -d '' file; do
+          echo "testing file $file"
+          if [ "$(grep -Po 'safe_to_bootstrap:.*\K\d' "$file")" = "1" ]; then
+            safe_dir=$(dirname $file)
+            if [ "$safe_dir" != "/var/lib/mysql/$POD_NAME" ]; then
+              mv "$safe_dir" "/var/lib/mysql/temp-dir"
+              mv "/var/lib/mysql/$POD_NAME" "$safe_dir"
+              mv "/var/lib/mysql/temp-dir" "/var/lib/mysql/$POD_NAME"
+            fi
+            echo "grastate.dat indicates safe_to_bootstrap=1 → bootstrapping new Galera cluster from existing data"
+            exec docker-entrypoint.sh mysqld
+          fi
+        done
+        echo "grastate.dat does not indicate safe_to_bootstrap=1 → checking other options"
+        BASE_DIR="/var/lib/mysql"
+    
+        BEST_NODE=""
+        BEST_SEQNO="-1"
+    
+        for dir in "$BASE_DIR"/*; do
+        [ -d "$dir" ] || continue
+    
+        FILE="$dir/grastate.dat"
+    
+        if [ -f "$FILE" ]; then
+          SEQNO=$(grep -i "^seqno:" "$FILE" | awk '{print $2}')
+        else
+          SEQNO="-1"
+        fi
+    
+        # Recover if needed
+        if [ "$SEQNO" = "-1" ]; then
+          echo "Recovering seqno for $dir..."
+          SEQNO=$(mysqld --wsrep-recover --datadir="$dir" 2>&1 \
+            | grep -E "Recovered position|WSREP: Recovered position" \
+            | tail -1 \
+            | sed 's/.*://')
+    
+          # fallback safety
+          if [ -z "$SEQNO" ]; then
+            echo "Recovery failed → seqno=-1"
+            SEQNO="-1"
+          fi
+        fi
+    
+        echo "$dir → seqno=$SEQNO"
+    
+        if [ "$SEQNO" -gt "$BEST_SEQNO" ]; then
+          BEST_SEQNO="$SEQNO"
+          BEST_NODE="$dir"
+        fi
+        done
+    
+        echo "-----------------------------------"
+        echo "Selected bootstrap node: $BEST_NODE"
+        echo "With seqno: $BEST_SEQNO"
+        if [ "$BEST_NODE" != "/var/lib/mysql/$POD_NAME" ]; then
+          mv "$BEST_NODE" "/var/lib/mysql/temp-dir"
+          mv "/var/lib/mysql/$POD_NAME" "$BEST_NODE"
+          mv "/var/lib/mysql/temp-dir" "/var/lib/mysql/$POD_NAME"
+        fi
+        sed -i 's/safe_to_bootstrap:.*/safe_to_bootstrap: 1/' /var/lib/mysql/$POD_NAME/grastate.dat
+        exec docker-entrypoint.sh mysqld --wsrep-new-cluster
+      else
+        echo "grastate.dat found but other nodes are active → joining existing cluster"
+        exec docker-entrypoint.sh mysqld
+      fi
     fi
