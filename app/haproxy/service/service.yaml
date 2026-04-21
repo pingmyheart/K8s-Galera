@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: haproxy
+  namespace: galera
+  labels:
+    app: haproxy
+spec:
+  selector:
+    app: haproxy
+  ports:
+    - name: mysql-write
+      port: 3306
+      targetPort: mysql-write
+      protocol: TCP
+    - name: mysql-read
+      port: 3307
+      targetPort: mysql-read
+      protocol: TCP

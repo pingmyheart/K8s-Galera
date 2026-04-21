@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: haproxy
+  namespace: galera
+data:
+  haproxy.cfg: |
+    global
+      log stdout format raw local0
+      maxconn 4096
+          
+    listen stats
+      bind *:8404
+      mode http
+      stats enable
+      stats uri /stats
+      stats refresh 10s
+    
+    timeout client 10s
+    timeout server 10s
+    timeout connect 5s
+  
+    defaults
+      log global
+      mode tcp
+      option tcplog
+      timeout connect 5s
+      timeout client  30s
+      timeout server  30s
+    
+    # ------------------------
+    # WRITE (primary traffic)
+    # ------------------------
+    frontend mysql-write
+      bind *:3306
+      default_backend galera-write
+
+    backend galera-write
+      mode tcp
+      balance roundrobin
+      option mysql-check user haproxy_check
+
+      # Only route to healthy nodes
+      server galera-0 mariadb-0.mariadb:3306 check
+      server galera-1 mariadb-1.mariadb:3306 check
+      server galera-2 mariadb-2.mariadb:3306 check
+
+    # ------------------------
+    # OPTIONAL: READ TRAFFIC
+    # ------------------------
+    frontend mysql-read
+      bind *:3307
+      default_backend galera-read
+
+    backend galera-read
+      mode tcp
+      balance leastconn
+      option mysql-check user haproxy_check
+
+      server galera-0 mariadb-0.mariadb:3306 check
+      server galera-1 mariadb-1.mariadb:3306 check
+      server galera-2 mariadb-2.mariadb:3306 check

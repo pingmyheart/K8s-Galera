@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mariadb
+  namespace: galera
+  labels:
+    app: mariadb
+spec:
+  serviceName: mariadb
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mariadb
+  template:
+    metadata:
+      labels:
+        app: mariadb
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - mariadb
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: mariadb
+          image: mariadb:10.11
+          ports:
+            - containerPort: 3306
+              name: mysql
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: mariadb
+          imagePullPolicy: Always
+          command:
+            - sh
+            - -c
+            - sh /opt/run.sh
+          volumeMounts:
+            - mountPath: /opt/run.sh
+              name: mariadb
+              subPath: run.sh
+            - mountPath: /config/my.cnf
+              name: mariadb
+              subPath: my.cnf
+            - mountPath: /var/lib/mysql
+              name: data
+          livenessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - MYSQL_PWD="$MARIADB_ROOT_PASSWORD" healthcheck.sh --connect --innodb_initialized
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - bash
+                - -c
+                - MYSQL_PWD="$MARIADB_ROOT_PASSWORD" healthcheck.sh --connect --innodb_initialized
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: mariadb
+          configMap:
+            name: mariadb
+        - name: data
+          persistentVolumeClaim:
+            claimName: mariadb-galera-persistent-volume-claim

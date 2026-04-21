@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: haproxy
+  namespace: galera
+  labels:
+    app: haproxy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: haproxy
+  template:
+    metadata:
+      labels:
+        app: haproxy
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - haproxy
+                topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: user-initializer
+          image: mariadb:10.11
+          envFrom:
+            - secretRef:
+                name: mariadb
+          command:
+            - sh
+            - -c
+            - |
+              echo "Starting user init sidecar..."
+
+              # Wait for MariaDB to be reachable
+              until mysql -h mariadb-0.mariadb -uroot -p${MARIADB_ROOT_PASSWORD} -e "SELECT 1" >/dev/null 2>&1; do
+                echo "Waiting for MariaDB..."
+                sleep 5
+              done
+              until mysql -h mariadb-1.mariadb -uroot -p${MARIADB_ROOT_PASSWORD} -e "SELECT 1" >/dev/null 2>&1; do
+                echo "Waiting for MariaDB..."
+                sleep 5
+              done
+              until mysql -h mariadb-2.mariadb -uroot -p${MARIADB_ROOT_PASSWORD} -e "SELECT 1" >/dev/null 2>&1; do
+                echo "Waiting for MariaDB..."
+                sleep 5
+              done
+              
+              echo "MariaDB reachable. Checking Galera state..."
+
+              # Wait until Galera node is synced
+              until mysql -h mariadb-0.mariadb -uroot -p${MARIADB_ROOT_PASSWORD} -Nse \
+                "SHOW STATUS LIKE 'wsrep_local_state_comment';" | grep -q Synced; do
+                echo "Waiting for Galera to be Synced..."
+                sleep 5
+              done
+              
+              echo "Galera is Synced. Checking if user exists..."
+                echo "Creating user..."
+                mysql -h mariadb-0.mariadb -uroot -p${MARIADB_ROOT_PASSWORD} <<EOF
+                CREATE USER IF NOT EXISTS 'haproxy_check'@'%' IDENTIFIED BY '';
+                GRANT USAGE ON *.* TO 'haproxy_check'@'%';
+                
+              EOF
+              
+              echo "Done."
+          imagePullPolicy: Always
+          volumeMounts:
+            - name: config
+              mountPath: /usr/local/etc/haproxy
+      containers:
+        - name: haproxy
+          image: haproxy:2.9
+          ports:
+            - containerPort: 3306
+              name: mysql-write
+              protocol: TCP
+            - containerPort: 3307
+              name: mysql-read
+              protocol: TCP
+          imagePullPolicy: Always
+          livenessProbe:
+            httpGet:
+              path: /stats
+              port: 8404
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /stats;csv
+              port: 8404
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /usr/local/etc/haproxy
+      volumes:
+        - name: config
+          configMap:
+            name: haproxy

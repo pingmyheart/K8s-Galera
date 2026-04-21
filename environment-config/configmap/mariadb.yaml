@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mariadb
+  namespace: galera
+data:
+  my.cnf: |-
+    [mysqld]
+    datadir=
+    
+    binlog_format=ROW
+    default_storage_engine=InnoDB
+    innodb_autoinc_lock_mode=2
+
+    wsrep_on=ON
+    wsrep_provider=/usr/lib/galera/libgalera_smm.so
+    wsrep_cluster_name="k8s_galera_cluster"
+
+    wsrep_cluster_address="gcomm://mariadb-0.mariadb.galera.svc.cluster.local,mariadb-1.mariadb.galera.svc.cluster.local,mariadb-2.mariadb.galera.svc.cluster.local"
+
+    wsrep_node_address=""
+    wsrep_node_name=""
+
+    wsrep_sst_method=rsync
+  run.sh: |-
+    #!/bin/sh
+
+    echo "Determining current pod and statefulset..."
+    POD_NAME=$(hostname)
+    POD_IP=$(hostname -i)
+
+    cat /config/my.cnf \
+        | sed "s/wsrep_node_address=\"\"/wsrep_node_address=\"${POD_IP}\"/" \
+        | sed "s/wsrep_node_name=\"\"/wsrep_node_name=\"${POD_NAME}\"/" \
+        | sed "s/datadir=/datadir=\/var\/lib\/mysql\/${POD_NAME}/" \
+        > /etc/mysql/my.cnf
+
+    CLUSTER_NODES="mariadb-0.mariadb mariadb-1.mariadb mariadb-2.mariadb"
+
+    DATA_DIR="/var/lib/mysql/$POD_NAME"
+    GRASTATE_FILE="$DATA_DIR/grastate.dat"
+
+    mkdir -p "$DATA_DIR"
+
+    CLUSTER_FOUND=0
+    BOOTSTRAP_REQUIRED=1
+
+    echo "Checking existing cluster state..."
+
+    # 1. If any node is already alive in a cluster → join, do NOT bootstrap
+    for node in $CLUSTER_NODES; do
+      if [ "$node" = "${POD_NAME}.mariadb" ]; then
+        continue
+      fi
+
+      if mysqladmin ping -h "$node" --silent; then
+        echo "Detected active MySQL node: $node"
+        CLUSTER_FOUND=1
+        BOOTSTRAP_REQUIRED=0
+        break
+      fi
+    done
+
+    # 2. If local grastate.dat exists and safe_to_bootstrap is 0 → cluster already existed
+    if [ -f "$GRASTATE_FILE" ]; then
+      echo "Found existing grastate.dat"
+
+      SAFE_TO_BOOTSTRAP=$(grep -i "safe_to_bootstrap" "$GRASTATE_FILE" | awk -F': ' '{print $2}')
+
+      if [ "$SAFE_TO_BOOTSTRAP" != "1" ]; then
+        echo "Node has prior cluster history → joining existing cluster"
+        BOOTSTRAP_REQUIRED=0
+      fi
+    fi
+
+    # 3. Start server accordingly
+    if [ "$BOOTSTRAP_REQUIRED" -eq 1 ]; then
+      echo "No existing cluster detected → bootstrapping new Galera cluster"
+      exec docker-entrypoint.sh mysqld --wsrep-new-cluster
+    else
+      echo "Joining existing Galera cluster"
+      exec docker-entrypoint.sh mysqld
+    fi

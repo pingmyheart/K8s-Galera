@@ -1,0 +1,35 @@
+#apiVersion: storage.k8s.io/v1
+#kind: StorageClass
+#metadata:
+#  name: mariadb-galera-scn
+#provisioner: kubernetes.io/no-provisioner
+#allowVolumeExpansion: true
+#volumeBindingMode: Immediate
+#---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mariadb-galera-persistent-volume
+spec:
+  accessModes:
+    - ReadWriteMany
+  capacity:
+    storage: 8Gi
+  storageClassName: mariadb-galera-scn # Same storage class as pvc
+  nfs:
+    server: 82.165.169.189
+    path: /var/nfs/k8s/mariadb.galera
+    readOnly: false
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mariadb-galera-persistent-volume-claim
+  namespace: galera
+spec:
+  storageClassName: mariadb-galera-scn
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 8Gi
